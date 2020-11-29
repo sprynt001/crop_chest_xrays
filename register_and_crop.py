@@ -203,7 +203,7 @@ if __name__ == "__main__":
 
         moving_image = sitk.ReadImage(moving_image_path, sitk.sitkFloat32)
         if moving_image.GetDimension() == 3:
-            moving_image = squeeze_image(fixed_image)
+            moving_image = squeeze_image(moving_image)
         moving_resampled,_ = register_image(fixed_image, moving_image)
 
         if crop_flag:
