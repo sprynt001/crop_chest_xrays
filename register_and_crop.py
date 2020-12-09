@@ -5,9 +5,10 @@ a ROI in the reference space.
 It was written to allow the extraction of the chest region from whole
 body x-rays of mice.
 
-The key function is register_image which can be imported i.e.
+The key functions are register_image and pca_align_image which can be 
+imported i.e.
 
-from register_and_crop import register_image
+from register_and_crop import register_image, pca_align_image
 
 However, the script can be called with parameters to allow registration of
 a single image or a number of images whose paths are in a text file. Type
@@ -19,7 +20,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import SimpleITK as sitk
 
-def register_image(fixed_image, moving_image):
+def register_image(fixed_image, moving_image, initial_transform=None):
     """register moving_image to fixed_image using rigid body registration.
     
     Parameters
@@ -28,6 +29,8 @@ def register_image(fixed_image, moving_image):
         Reference image.
     moving_image : SimpleITK.Image of type sitkFloat32
         Image to be registered.
+    initial_transform : SimpleITK.Transform
+        Initial transform to align the images
 
     Returns
     -------
@@ -40,11 +43,12 @@ def register_image(fixed_image, moving_image):
     
     """
 
-    # Initially align the centers
-    initial_transform = sitk.CenteredTransformInitializer(
-        fixed_image, 
-        moving_image, 
-        sitk.Euler2DTransform())
+    # If no initial transform supplied, initially align the centers
+    if initial_transform is None:
+        initial_transform = sitk.CenteredTransformInitializer(
+            fixed_image, 
+            moving_image, 
+            sitk.Euler2DTransform())
 
     # registration configuration from multires_registration function. See
     # http://insightsoftwareconsortium.github.io/SimpleITK-Notebooks/Python_html/60_Registration_Introduction.html
@@ -83,6 +87,97 @@ def register_image(fixed_image, moving_image):
                                      sitk.sitkLinear, 0.0,
                                      moving_image.GetPixelID())
     return (moving_resampled, final_transform)
+
+def pca_align_image(fixed_image, moving_image):
+    """align moving image to fixed image using PCA.
+
+    Parameters
+    ----------
+    fixed_image : SimpleITK.Image of type sitkFloat32
+        Reference image.
+    moving_image : SimpleITK.Image of type sitkFloat32
+        Image to be registered.
+    
+    Returns
+    -------
+    moving_resampled : SimpleITK.Image of type sitkFloat32
+        Moving image transformed to same space as reference image.
+
+    transform : SimpleITK.Transform
+        A 2D Euclidean transform with the translation and rotations to
+        aling the moving image to the reference image.
+
+    """
+
+    # Compute centres and angle with y-axis of images
+    fixed_centre, fixed_theta = image_pca(fixed_image)
+    moving_centre, moving_theta = image_pca(moving_image)
+
+    # Create transform to align moving with fixed (use inverse of 
+    # transform from moving to fixed)
+    transform = sitk.Euler2DTransform()
+    transform.SetCenter(
+        moving_image.TransformContinuousIndexToPhysicalPoint(
+            moving_centre
+        )
+    )
+
+    tx = fixed_centre[0]-moving_centre[0]
+    ty = fixed_centre[1]-moving_centre[1]
+    dtheta = moving_theta - fixed_theta
+
+    transform.SetAngle(-dtheta)
+    transform.SetTranslation((-tx, -ty))
+    moving_resampled = sitk.Resample(moving_image, transform)
+
+    return moving_resampled, transform
+
+
+def image_pca(im):
+    """Compute PCA on an image assuming one foreground object
+
+    Parameters
+    ----------
+    im : SimpleITK.Image
+
+    Returns
+    -------
+    mean : tuple of two floats
+        x,y coordinates of centre of foreground
+    
+    theta : scalar
+        angle in radians between largest PCA direction and y axis
+    """
+    # Threshold images using Otsu's method
+    otsu_filter = sitk.OtsuThresholdImageFilter()
+    otsu_filter.SetInsideValue(1)
+    otsu_filter.SetOutsideValue(0)
+    seg = sitk.GetArrayFromImage(otsu_filter.Execute(im))
+
+    # Get x,y coordinates of foreground and compute means (centres for
+    # rotation)
+
+    # Assume 0,0 is in background
+    y,x = np.nonzero(seg != seg[0,0])
+    x = np.array(x, dtype=np.float64)
+    y = np.array(y, dtype=np.float64)
+    x_mean = x.mean()
+    y_mean = y.mean()
+    
+    # Center data about mean
+    x -= x_mean
+    y -= y_mean
+    
+    # Compute covariance matrix
+    m = np.stack((x, y), axis=0)
+    covariance = np.cov(m)
+    e_val, e_vec = np.linalg.eigh(covariance)
+
+    index = np.argmax(e_val)
+    theta = np.arccos(e_vec[1,index])
+
+    return (x_mean, y_mean), theta
+
 
 # Utility function to make 2D images of size (nrows, ncols, 1) into
 # (nrows, ncols) i.e. squeeze out the redundant dimension
@@ -204,7 +299,11 @@ if __name__ == "__main__":
         moving_image = sitk.ReadImage(moving_image_path, sitk.sitkFloat32)
         if moving_image.GetDimension() == 3:
             moving_image = squeeze_image(moving_image)
-        moving_resampled,_ = register_image(fixed_image, moving_image)
+
+        moving_resampled, initial_transform = pca_align_image(
+            fixed_image, moving_image)
+        moving_resampled,_ = register_image(
+            fixed_image, moving_image, initial_transform)
 
         if crop_flag:
             moving_resampled = crop_image(moving_resampled, 
